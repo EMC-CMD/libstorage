@@ -169,6 +169,14 @@ func (d *driver) Format(
 					"error creating filesystem",
 					err)
 			}
+		case "ocfs2":
+			if err := exec.Command(
+				"mkfs.ocfs2", "-b 4K", "-C 32K", "-N 64", deviceName).Run(); err != nil {
+				return goof.WithFieldE(
+					"deviceName", deviceName,
+					"error creating filesystem",
+					err)
+			}
 		default:
 			return errUnsupportedFileSystem
 		}
@@ -205,6 +213,16 @@ type probeData struct {
 }
 
 func probeFsType(device string) (string, error) {
+		outbytes, err := exec.Command("blkid", "-o value", "-s TYPE" , device).Output();
+		out := string(outbytes)
+		fmt.Println("Checking Filesystem of : " + device + " command is : blkid -o value -s TYPE " + device + ". Determined Filesystem is: " + out)
+		if err != nil {
+			 return "", goof.WithFieldE( "deviceName", device, "error reading Filesystem", err)
+		}
+		if out == "ocfs2" {
+			fmt.Println("Returning ocfs2")
+			return "ocfs2", nil
+		}
 	probes := []probeData{
 		{"btrfs", "_BHRfS_M", 0x10040},
 		{"ext4", "\123\357", 0x438},
