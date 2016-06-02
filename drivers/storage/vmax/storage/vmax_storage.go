@@ -120,23 +120,20 @@ func (d *driver) Volumes(
 	opts *types.VolumesOpts) ([]*types.Volume, error) {
 	symmetrixID := d.symmetrix.SymmetrixID
 
-	vmaxVolumes, err := d.client.ListVolumes(symmetrixID, "")
+	vmaxVolumes, err := d.client.ListVolumes(symmetrixID, "", false)
 	if err != nil {
 		return []*types.Volume{}, err
 	}
 
-	volumes := make([]*types.Volume, len(vmaxVolumes.ResultList.Result))
-	for i, v := range vmaxVolumes.ResultList.Result {
-		singleVol, err := d.client.GetVolume(symmetrixID, v.VolumeID)
+	volumesResult := vmaxVolumes.ResultList.Result
+	volumes := make([]*types.Volume, len(volumesResult))
+
+	for i, v := range volumesResult {
+		volume, err := d.VolumeInspect(ctx, v.VolumeID, &types.VolumeInspectOpts{
+			Attachments: opts.Attachments,
+		})
 		if err != nil {
 			return []*types.Volume{}, err
-		}
-		volume := &types.Volume{
-			Name:   singleVol.Volume[0].VolumeIdentifier,
-			ID:     v.VolumeID,
-			Status: "",
-			Type:   singleVol.Volume[0].Type,
-			Size:   int64(singleVol.Volume[0].CapGb),
 		}
 
 		volumes[i] = volume
@@ -157,9 +154,6 @@ func (d *driver) VolumeInspect(
 	if err != nil {
 		return nil, err
 	}
-	// if len(volumes) == 0 {
-	// 	return nil, nil
-	// }
 
 	volume := &types.Volume{
 		Name:   vmaxVolume.Volume[0].VolumeIdentifier,
@@ -167,6 +161,26 @@ func (d *driver) VolumeInspect(
 		Status: "",
 		Type:   vmaxVolume.Volume[0].Type,
 		Size:   int64(vmaxVolume.Volume[0].CapGb),
+	}
+
+	if opts.Attachments {
+		log.Debug("Getting volume's attachments")
+		attachments, err := d.client.GetAttachments(d.symmetrix.SymmetrixID,volumeID)
+		log.Debug("attachments: %s", attachments.InitiatorIDs[0])
+		if err != nil {
+			log.Debug("error occurred peter %s", err)
+			return volume, err
+		}
+
+		log.Debug("Done getting volume's attachments")
+		volume.Attachments = make([]*types.VolumeAttachment, len(attachments.InitiatorIDs))
+		for i, initiatorID := range attachments.InitiatorIDs {
+			volume.Attachments[i] = &types.VolumeAttachment{
+				InstanceID: &types.InstanceID{
+						ID: initiatorID,
+				},
+			}
+		}
 	}
 
 	return volume, nil
