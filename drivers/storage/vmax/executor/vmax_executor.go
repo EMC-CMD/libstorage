@@ -1,32 +1,25 @@
 package executor
 
 import (
+	"bufio"
 	"fmt"
 	"io/ioutil"
-	"os/exec"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/akutz/gofig"
-	"github.com/akutz/goof"
 	"github.com/emccode/libstorage/api/registry"
 	"github.com/emccode/libstorage/api/types"
-)
-
-const (
-	// Name is the name of the driver.
-	Name = "vmax"
+	"github.com/emccode/libstorage/drivers/storage/vmax"
 )
 
 // driver is the storage executor for the VMAX storage driver.
-type driver struct {
-	Config     gofig.Config
-	instanceID *types.InstanceID
-}
+type driver struct{}
 
 func init() {
-	registry.RegisterStorageExecutor(Name, newdriver)
+	registry.RegisterStorageExecutor(vmax.Name, newdriver)
 }
 
 func newdriver() types.StorageExecutor {
@@ -34,17 +27,11 @@ func newdriver() types.StorageExecutor {
 }
 
 func (d *driver) Init(context types.Context, config gofig.Config) error {
-	d.Config = config
-	id, err := GetInstanceID()
-	if err != nil {
-		return err
-	}
-	d.instanceID = id
 	return nil
 }
 
 func (d *driver) Name() string {
-	return Name
+	return vmax.Name
 }
 
 // NextDevice returns the next available device.
@@ -65,7 +52,7 @@ func (d *driver) LocalDevices(
 	}
 
 	return &types.LocalDevices{
-		Driver:    Name,
+		Driver:    vmax.Name,
 		DeviceMap: lvm,
 	}, nil
 }
@@ -113,30 +100,40 @@ func getLocalWWNDeviceByID() (map[string]string, error) {
 func (d *driver) InstanceID(
 	ctx types.Context,
 	opts types.Store) (*types.InstanceID, error) {
-	return d.instanceID, nil
+
+	return GetInstanceID()
 }
 
 // GetInstanceID returns the instance ID object
 func GetInstanceID() (*types.InstanceID, error) {
-	mac, err := getLocalMACAddress()
+	initiatorName, err := getiSCSIinitName()
 	if err != nil {
 		return nil, err
 	}
-	iid := &types.InstanceID{Driver: Name}
-	if err := iid.MarshalMetadata(mac); err != nil {
+
+	iid := &types.InstanceID{Driver: vmax.Name}
+	if err := iid.MarshalMetadata(initiatorName); err != nil {
 		return nil, err
 	}
 
 	return iid, nil
 }
 
-func getLocalMACAddress() (macAddress string, err error) {
-	out, err := exec.Command("cat", "cat /sys/class/net/eth0/address").Output()
+func getiSCSIinitName() (initiatorName string, err error) {
+	file, err := os.Open("/etc/iscsi/initiatorname.iscsi")
 	if err != nil {
-		return "", goof.WithError("problem getting mac address", err)
+		return "", fmt.Errorf("error reading /etc/iscsi/initiatorname.iscsi %s", err)
+	}
+	scanner := bufio.NewScanner(file)
+	scanner.Split(bufio.ScanLines)
+	var lastLine string
+	for scanner.Scan() {
+		lastLine = scanner.Text()
+	}
+	initiatorName = strings.Split(lastLine, "=")[1]
+	if initiatorName == "" {
+		return "", fmt.Errorf("error reading /etc/iscsi/initiatorname.iscsi")
 	}
 
-	macAddress = strings.Replace(string(out), "\n", "", -1)
-
-	return macAddress, nil
+	return initiatorName, nil
 }

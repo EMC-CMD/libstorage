@@ -2,7 +2,6 @@ package storage
 
 import (
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 
@@ -10,8 +9,8 @@ import (
 	"github.com/akutz/gofig"
 	"github.com/akutz/goof"
 
-	symm "github.com/EMC-CMD/govmaxapi/api"
-	symmtypes "github.com/EMC-CMD/govmaxapi/model"
+	symm "github.com/emccode/govmax/api/v2"
+	symmtypes "github.com/emccode/govmax/api/v2/model"
 
 	"github.com/emccode/libstorage/api/context"
 	"github.com/emccode/libstorage/api/registry"
@@ -20,9 +19,10 @@ import (
 )
 
 type driver struct {
-	config   gofig.Config
-	client   *symm.Client
-	systemID string
+	config         gofig.Config
+	client         symm.Client
+	symmetrix      symmtypes.Symmetrix
+	storageGroupId string
 }
 
 func init() {
@@ -38,24 +38,37 @@ func (d *driver) Name() string {
 }
 
 func (d *driver) Init(context types.Context, config gofig.Config) error {
-	d.systemID = d.systemID()
 	d.config = config
-	fields := eff(map[string]interface{}{
-		"endpoint": d.endpoint(),
-	})
-
-	log.WithFields(fields).Debug("starting vmax driver")
-
-	var err error
-	if d.client, err = vmax.NewClient(
+	d.client = symm.NewClient(
 		d.endpoint(),
 		d.userName(),
 		d.password(),
 		d.port(),
-		d.insecure()); err != nil {
-		return goof.WithFieldsE(fields, "error constructing new client", err)
+		d.insecure())
+
+	symmetrix, err := d.client.GetSymmetrix(d.symmetrixID())
+	if err != nil {
+		return fmt.Errorf("Error Finding Symmetrix %s. %s", d.symmetrixID(), err)
 	}
 
+	d.symmetrix = symmetrix
+	d.storageGroupId = d.storageGroupID()
+
+	err = d.initStorageGroup()
+	if err != nil {
+		return fmt.Errorf("Error creating storage group for use with libStorage! %s", err)
+	}
+
+	fields := eff(map[string]interface{}{
+		"symmetrixId": d.symmetrix.SymmetrixID,
+		"endpoint":    d.endpoint(),
+		"port":        d.port(),
+		"username":    d.userName(),
+		"password":    "******",
+		"insecure":    d.insecure(),
+	})
+
+	log.WithFields(fields).Debug("starting vmax driver")
 	log.WithFields(fields).Info("storage initialized")
 	return nil
 }
@@ -70,37 +83,51 @@ func (d *driver) InstanceInspect(ctx types.Context, opts types.Store) (*types.In
 		return &types.Instance{InstanceID: iid}, nil
 	}
 
-	var systemID *vmax.ID
-	if err := iid.UnmarshalMetadata(&systemID); err != nil {
+	var initiatorName string
+	if err := iid.UnmarshalMetadata(&initiatorName); err != nil {
 		return nil, err
 	}
 
-	if system, err = d.system.FindSystemByID(systemID); err != nil {
-		return nil, fmt.Errorf("unable to find system id")
+	hosts, err := d.client.ListHosts(d.symmetrix.SymmetrixID)
+	if err != nil {
+		return nil, err
 	}
 
-	if system != nil {
-		return &types.Instance{
-			InstanceID: &types.InstanceID{
-				ID: systemID,
-			},
-		}, nil
+	for _, hostID := range hosts.HostID {
+		host, err := d.client.GetHost(d.symmetrix.SymmetrixID, hostID)
+		if err != nil {
+			return nil, err
+		}
+
+		initiators := host.Host[0].Initiator
+		for _, initiator := range initiators {
+			if initiator == initiatorName {
+				instance := types.Instance{
+					InstanceID: &types.InstanceID{
+						ID: d.symmetrix.SymmetrixID,
+					},
+				}
+				return &instance, nil
+			}
+		}
 	}
 
-	return nil, fmt.Errorf("system id is not set in config")
+	return nil, fmt.Errorf("Host is not connected to VMAX")
 }
 
 func (d *driver) Volumes(
 	ctx types.Context,
-	opts *types.VolumesOpts) (volumes []*types.Volume, err error) {
+	opts *types.VolumesOpts) ([]*types.Volume, error) {
+	symmetrixID := d.symmetrix.SymmetrixID
 
-	vmaxVolumes, err := d.client.ListVolumes(d.systemID)
+	vmaxVolumes, err := d.client.ListVolumes(symmetrixID, "")
 	if err != nil {
 		return []*types.Volume{}, err
 	}
 
-	for _, v := range vmaxVolumes.ResultList.Result {
-		singleVol, err := d.client.GetVolume(d.systemID, v.VolumeID)
+	volumes := make([]*types.Volume, len(vmaxVolumes.ResultList.Result))
+	for i, v := range vmaxVolumes.ResultList.Result {
+		singleVol, err := d.client.GetVolume(symmetrixID, v.VolumeID)
 		if err != nil {
 			return []*types.Volume{}, err
 		}
@@ -111,7 +138,8 @@ func (d *driver) Volumes(
 			Type:   singleVol.Volume[0].Type,
 			Size:   int64(singleVol.Volume[0].CapGb),
 		}
-		volumes = append(volumes, volume)
+
+		volumes[i] = volume
 	}
 
 	return volumes, nil
@@ -125,7 +153,7 @@ func (d *driver) VolumeInspect(
 		return nil, goof.New("no volumeID specified")
 	}
 
-	vmaxVolume, err := d.client.GetVolume(d.systemID, volumeID)
+	vmaxVolume, err := d.client.GetVolume(d.symmetrix.SymmetrixID, volumeID)
 	if err != nil {
 		return nil, err
 	}
@@ -151,35 +179,20 @@ func (d *driver) VolumeCreate(ctx types.Context, volumeName string,
 		"opts":       opts,
 	})
 	log.WithFields(fields).Debug("creating volume")
-
-	volume := &types.Volume{}
-	if opts.AvailabilityZone != nil {
-		volume.AvailabilityZone = *opts.AvailabilityZone
-	}
-	if opts.Type != nil {
-		volume.Type = *opts.Type
-	}
-	if opts.Size != nil {
-		volume.Size = *opts.Size
+	if opts.Size == nil {
+		return &types.Volume{}, fmt.Errorf("Need to specify size in VolumeCreateOpts")
 	}
 
-	vmaxVolume := symmtypes.EditStorageGroupParam{
-		EditStorageGroupActionParam: symmtypes.EditStorageGroupActionParam{
-			ExpandStorageGroupParam: symmtypes.ExpandStorageGroupParam{
-				NumOfVols: 1,
-				VolumeAttribute: symmtype.VolumeAttribute{
-					CapacityUnit: "GB",
-					VolumeSize:   strconv.FormatInt(volume.Size, 10),
-				},
-				CreateNewVolumes: true,
-				Emulation:        "FBA",
-			},
-		},
-	}
-
-	err := d.client.CreateVolume(d.systemID, "EMCDOJO", vmaxVolume)
+	volIDs, err := d.client.CreateVolume(d.symmetrix.SymmetrixID, strconv.Itoa(int(*opts.Size)), "FBA", 1)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create volume: %s", err)
+	}
+
+	volume := &types.Volume{
+		ID:               volIDs[0],
+		Size:             *opts.Size,
+		Type:             *opts.Type,
+		AvailabilityZone: *opts.AvailabilityZone,
 	}
 
 	return volume, nil
@@ -215,8 +228,8 @@ func (d *driver) VolumeRemove(
 		"volumeId": volumeID,
 	})
 
-	if err := d.client.DeleteVolume(d.systemID, "EMCDOJO", volumeID); err != nil {
-		return goof.WithFieldsE(fields, "error removing volume", err)
+	if err := d.client.DeleteVolume(d.symmetrix.SymmetrixID, volumeID); err != nil {
+		return goof.WithFieldsE(fields, "error deleting volume", err)
 	}
 
 	log.WithFields(fields).Debug("removed volume")
@@ -228,22 +241,8 @@ func (d *driver) VolumeAttach(
 	volumeID string,
 	opts *types.VolumeAttachOpts) (*types.Volume, string, error) {
 
-	if err := d.client.DeleteVolumeFromStorageGroup(d.systemID, "EMCDOJO", volumeID); err != nil {
-		return goof.WithFieldsE(fields, "error removing volume from EMCDOJO SG", err)
-	}
-
-	addVolumeParam := symmtypes.EditStorageGroupParam{
-		EditStorageGroupActionParam: symmtypes.EditStorageGroupActionParam{
-			AddVolumeParam: symmtypes.AddVolumeParam{
-				VolumeID: []string{
-					volumeID,
-				},
-			},
-		},
-	}
-
-	if err := d.client.EditStorageGroup(symmetricID, "CloudFoundry", addVolumeParam); err != nil {
-		return goof.WithFieldsE(fields, "error adding volume to CloudFoundry SG", err)
+	if err := d.client.AddVolumeToStorageGroup(d.symmetrix.SymmetrixID, d.storageGroupId, volumeID); err != nil {
+		return nil, "", goof.WithError("error adding volume to storage group. %s", err)
 	}
 
 	attachedVol, err := d.VolumeInspect(
@@ -252,7 +251,7 @@ func (d *driver) VolumeAttach(
 			Opts:        opts.Opts,
 		})
 	if err != nil {
-		return nil, "", goof.WithError("error getting volume after adding to CloudFoundry SG", err)
+		return nil, "", goof.WithError("error getting volume after adding to storage group", err)
 	}
 
 	return attachedVol, attachedVol.ID, nil
@@ -263,34 +262,17 @@ func (d *driver) VolumeDetach(
 	volumeID string,
 	opts *types.VolumeDetachOpts) (*types.Volume, error) {
 
-	if err := d.client.DeleteVolumeFromStorageGroup(d.systemID, "CloudFoundry", volumeID); err != nil {
-		return goof.WithFieldsE(fields, "error removing volume from CloudFoundry SG", err)
+	if err := d.client.RemoveVolumeFromStorageGroup(d.symmetrix.SymmetrixID, d.storageGroupId, volumeID); err != nil {
+		return nil, goof.WithError("error removing volume from storage group", err)
 	}
 
-	addVolumeParam := symmtypes.EditStorageGroupParam{
-		EditStorageGroupActionParam: symmtypes.EditStorageGroupActionParam{
-			AddVolumeParam: symmtypes.AddVolumeParam{
-				VolumeID: []string{
-					volumeID,
-				},
-			},
-		},
-	}
-
-	if err := d.client.EditStorageGroup(symmetricID, "EMCDOJO", addVolumeParam); err != nil {
-		return goof.WithFieldsE(fields, "error adding volume to EMCDOJO SG", err)
-	}
-
-	attachedVol, err := d.VolumeInspect(
+	detachedVol, _ := d.VolumeInspect(
 		ctx, volumeID, &types.VolumeInspectOpts{
 			Attachments: true,
 			Opts:        opts.Opts,
 		})
-	if err != nil {
-		return nil, "", goof.WithError("error getting volume after adding to EMCDOJO SG", err)
-	}
 
-	return volume, nil
+	return detachedVol, nil
 }
 
 func (d *driver) NextDeviceInfo(ctx types.Context) (*types.NextDeviceInfo, error) {
@@ -337,7 +319,7 @@ func (d *driver) SnapshotRemove(
 
 func eff(fields goof.Fields) map[string]interface{} {
 	errFields := map[string]interface{}{
-		"provider": "scaleIO",
+		"provider": "vmax",
 	}
 	if fields != nil {
 		for k, v := range fields {
@@ -351,17 +333,6 @@ func eff(fields goof.Fields) map[string]interface{} {
 //////                  CONFIG HELPER STUFF                   /////////
 ///////////////////////////////////////////////////////////////////////
 
-func getLocalMACAddress() (macAddress string, err error) {
-	out, err := exec.Command("cat", "cat /sys/class/net/eth0/address").Output()
-	if err != nil {
-		return "", goof.WithError("problem getting mac address", err)
-	}
-
-	macAddress = strings.Replace(string(out), "\n", "", -1)
-
-	return macAddress, nil
-}
-
 func (d *driver) endpoint() string {
 	return d.config.GetString("vmax.endpoint")
 }
@@ -374,8 +345,20 @@ func (d *driver) password() string {
 	return d.config.GetString("vmax.password")
 }
 
-func (d *driver) systemID() string {
-	return d.config.GetString("vmax.systemID")
+func (d *driver) symmetrixID() string {
+	return d.config.GetString("vmax.symmetrixID")
+}
+
+func (d *driver) storageGroupID() string {
+	return d.config.GetString("vmax.storageGroupID")
+}
+
+func (d *driver) insecure() bool {
+	return d.config.GetBool("vmax.insecure")
+}
+
+func (d *driver) port() string {
+	return d.config.GetString("vmax.port")
 }
 
 func (d *driver) thinOrThick() string {
@@ -384,4 +367,20 @@ func (d *driver) thinOrThick() string {
 		return "ThinProvisioned"
 	}
 	return thinOrThick
+}
+
+func (d *driver) initStorageGroup() error {
+	_, err := d.client.GetStorageGroup(d.symmetrix.SymmetrixID, d.storageGroupId)
+	if err != nil {
+		if strings.Contains(err.Error(), "Cannot find Storage Group") {
+			err = d.client.CreateStorageGroup(d.symmetrix.SymmetrixID, "", "", d.storageGroupId)
+			if err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+
+	return nil
 }
