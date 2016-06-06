@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -104,7 +105,7 @@ func (d *driver) InstanceInspect(ctx types.Context, opts types.Store) (*types.In
 			if initiator == initiatorName {
 				instance := types.Instance{
 					InstanceID: &types.InstanceID{
-						ID: d.symmetrix.SymmetrixID,
+						ID: initiator,
 					},
 				}
 				return &instance, nil
@@ -120,7 +121,7 @@ func (d *driver) Volumes(
 	opts *types.VolumesOpts) ([]*types.Volume, error) {
 	symmetrixID := d.symmetrix.SymmetrixID
 
-	vmaxVolumes, err := d.client.ListVolumes(symmetrixID, "", false)
+	vmaxVolumes, err := d.client.ListVolumes(symmetrixID, "", true, false)
 	if err != nil {
 		return []*types.Volume{}, err
 	}
@@ -129,11 +130,20 @@ func (d *driver) Volumes(
 	volumes := make([]*types.Volume, len(volumesResult))
 
 	for i, v := range volumesResult {
-		volume, err := d.VolumeInspect(ctx, v.VolumeID, &types.VolumeInspectOpts{
-			Attachments: opts.Attachments,
-		})
-		if err != nil {
-			return []*types.Volume{}, err
+		volume := &types.Volume{
+			ID: v.VolumeID,
+
+			Status: "N/A - Query Volume Directly",
+			Name:   "N/A - Query Volume Directly",
+			Type:   "N/A - Query Volume Directly",
+			Attachments: []*types.VolumeAttachment{
+				&types.VolumeAttachment{
+					InstanceID: &types.InstanceID{
+						ID:     "N/A - Query Volume Directly",
+						Driver: "VMAX",
+					},
+				},
+			},
 		}
 
 		volumes[i] = volume
@@ -163,23 +173,19 @@ func (d *driver) VolumeInspect(
 		Size:   int64(vmaxVolume.Volume[0].CapGb),
 	}
 
-	if opts.Attachments {
-		log.Debug("Getting volume's attachments")
-		attachments, err := d.client.GetAttachments(d.symmetrix.SymmetrixID,volumeID)
-		log.Debug("attachments: %s", attachments.InitiatorIDs[0])
-		if err != nil {
-			log.Debug("error occurred peter %s", err)
-			return volume, err
-		}
+	log.Debug("Getting volume's attachments")
+	attachments, err := d.client.GetAttachments(d.symmetrix.SymmetrixID, volumeID)
+	if err != nil {
+		return volume, err
+	}
 
-		log.Debug("Done getting volume's attachments")
-		volume.Attachments = make([]*types.VolumeAttachment, len(attachments.InitiatorIDs))
-		for i, initiatorID := range attachments.InitiatorIDs {
-			volume.Attachments[i] = &types.VolumeAttachment{
-				InstanceID: &types.InstanceID{
-						ID: initiatorID,
-				},
-			}
+	log.Debug("Done getting volume's attachments")
+	volume.Attachments = make([]*types.VolumeAttachment, len(attachments.InitiatorIDs))
+	for i, initiatorID := range attachments.InitiatorIDs {
+		volume.Attachments[i] = &types.VolumeAttachment{
+			InstanceID: &types.InstanceID{
+				ID: initiatorID,
+			},
 		}
 	}
 
@@ -255,20 +261,64 @@ func (d *driver) VolumeAttach(
 	volumeID string,
 	opts *types.VolumeAttachOpts) (*types.Volume, string, error) {
 
-	if err := d.client.AddVolumeToStorageGroup(d.symmetrix.SymmetrixID, d.storageGroupId, volumeID); err != nil {
-		return nil, "", goof.WithError("error adding volume to storage group. %s", err)
-	}
+	iid := context.MustInstanceID(ctx)
+	re := regexp.MustCompile("[^\\w]")
+	instanceIDCompiled := re.ReplaceAllString(iid.ID, "")
+	storageGroup, err := d.client.GetStorageGroup(d.symmetrix.SymmetrixID, d.storageGroupID()+instanceIDCompiled)
+	if strings.Contains(err.Error(), "error finding storagegroup") {
+	} else {
+		if storageGroup.StorageGroup[0].NumOfMaskingViews > 0 {
+			for _, maskingViewID := range storageGroup.StorageGroup[0].Maskingview {
+				maskingView, err := d.client.GetMaskingView(d.symmetrix.SymmetrixID, maskingViewID)
+				if err != nil {
+					return nil, "", goof.WithError("error getting maskingview. %s", err)
+				}
+				if maskingView.MaskingView[0].HostID != "" {
+					host, err := d.client.GetHost(d.symmetrix.SymmetrixID, maskingView.MaskingView[0].HostID)
+					if err != nil {
+						return nil, "", goof.WithError("error getting host. %s", err)
+					}
+					for _, initiator := range host.Host[0].Initiator {
+						if initiator == iid.ID {
+							if err := d.client.AddVolumeToStorageGroup(d.symmetrix.SymmetrixID, d.storageGroupId, volumeID); err != nil {
+								return nil, "", goof.WithError("error adding volume to storage group. %s", err)
+							}
 
-	attachedVol, err := d.VolumeInspect(
-		ctx, volumeID, &types.VolumeInspectOpts{
-			Attachments: true,
-			Opts:        opts.Opts,
-		})
-	if err != nil {
-		return nil, "", goof.WithError("error getting volume after adding to storage group", err)
-	}
+							attachedVol, err := d.VolumeInspect(
+								ctx, volumeID, &types.VolumeInspectOpts{
+									Attachments: true,
+									Opts:        opts.Opts,
+								})
+							if err != nil {
+								return nil, "", goof.WithError("error getting volume after adding to storage group. %s", err)
+							}
 
-	return attachedVol, attachedVol.ID, nil
+							return attachedVol, attachedVol.ID, nil
+						}
+					}
+				}
+				//hostID := range maskingView.MaskingView[0].HostID
+			}
+		}
+	}
+	// hosts, err := d.client.ListHosts(d.symmetrix.SymmetrixID)
+	// if err != nil {
+	// 	return nil, "", goof.WithError("error getting list of hosts. %s", err)
+	// }
+	//
+	// for _, hostid := range hosts.HostID {
+	// 	host, err := d.client.GetHost(d.symmetrix.SymmetrixID, hostid)
+	// if err != nil {
+	// 	return nil, "", goof.WithError("error getting host. %s", err)
+	// }
+	// 	for _, initiator := range host.Host[0].Initiatorid {
+	// 		if initiator == iid.ID{
+	// 			maskingview, err := d.client.GetMaskingView(d.symmetrix.SymmetrixID, host.Host[0].Maskingview)
+	// 		}
+	// 	}
+	//
+	// }
+
 }
 
 func (d *driver) VolumeDetach(
