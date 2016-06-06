@@ -20,7 +20,7 @@ func registerConfig() {
 	r.Key(gofig.String, "", "smc", "", "vmax.password")
 	r.Key(gofig.String, "", "0000", "", "vmax.symmetrixID")
 	r.Key(gofig.String, "", "8443", "", "vmax.port")
-	r.Key(gofig.String, "", "libStorageVMAX", "", "vmax.storageGroupID")
+	r.Key(gofig.String, "", "libStorage_", "", "vmax.GroupPrefixID")
 
 	gofig.Register(r)
 }

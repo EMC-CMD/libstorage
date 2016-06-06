@@ -23,7 +23,7 @@ type driver struct {
 	config         gofig.Config
 	client         symm.Client
 	symmetrix      symmtypes.Symmetrix
-	storageGroupId string
+	groupPrefixID string
 }
 
 func init() {
@@ -53,7 +53,7 @@ func (d *driver) Init(context types.Context, config gofig.Config) error {
 	}
 
 	d.symmetrix = symmetrix
-	d.storageGroupId = d.storageGroupID()
+	d.groupPrefixID = d.groupPrefixID()
 
 	err = d.initStorageGroup()
 	if err != nil {
@@ -264,9 +264,25 @@ func (d *driver) VolumeAttach(
 	iid := context.MustInstanceID(ctx)
 	re := regexp.MustCompile("[^\\w]")
 	instanceIDCompiled := re.ReplaceAllString(iid.ID, "")
-	storageGroup, err := d.client.GetStorageGroup(d.symmetrix.SymmetrixID, d.storageGroupID()+instanceIDCompiled)
+	storageGroup, err := d.client.GetStorageGroup(d.symmetrix.SymmetrixID, d.groupPrefixID+instanceIDCompiled)
 	if strings.Contains(err.Error(), "error finding storagegroup") {
-	} else {
+		err = d.client.CreateStorageGroup(d.symmetrix.SymmetrixID, "","", d.groupPrefixID+instanceIDCompiled)
+		if err != nil {
+			return nil, "", goof.WithError("error creating storagegroup. %s", err)
+		}
+	}
+	host, err := d.client.GetHost(d.symmetrix.SymmetrixID,d.groupPrefixID+instanceIDCompiled)
+	if strings.Contains(err.Error(), "error getting host") {
+		
+		err = d.client.CreateHost(p model.CreateHostParam)
+	}
+
+
+
+
+
+
+
 		if storageGroup.StorageGroup[0].NumOfMaskingViews > 0 {
 			for _, maskingViewID := range storageGroup.StorageGroup[0].Maskingview {
 				maskingView, err := d.client.GetMaskingView(d.symmetrix.SymmetrixID, maskingViewID)
@@ -280,7 +296,7 @@ func (d *driver) VolumeAttach(
 					}
 					for _, initiator := range host.Host[0].Initiator {
 						if initiator == iid.ID {
-							if err := d.client.AddVolumeToStorageGroup(d.symmetrix.SymmetrixID, d.storageGroupId, volumeID); err != nil {
+							if err := d.client.AddVolumeToStorageGroup(d.symmetrix.SymmetrixID, d.groupPrefixID, volumeID); err != nil {
 								return nil, "", goof.WithError("error adding volume to storage group. %s", err)
 							}
 
@@ -299,6 +315,9 @@ func (d *driver) VolumeAttach(
 				}
 				//hostID := range maskingView.MaskingView[0].HostID
 			}
+		} else {
+			//create maskingView
+			//check for hostgroup
 		}
 	}
 	// hosts, err := d.client.ListHosts(d.symmetrix.SymmetrixID)
@@ -326,7 +345,7 @@ func (d *driver) VolumeDetach(
 	volumeID string,
 	opts *types.VolumeDetachOpts) (*types.Volume, error) {
 
-	if err := d.client.RemoveVolumeFromStorageGroup(d.symmetrix.SymmetrixID, d.storageGroupId, volumeID); err != nil {
+	if err := d.client.RemoveVolumeFromStorageGroup(d.symmetrix.SymmetrixID, d.groupPrefixID, volumeID); err != nil {
 		return nil, goof.WithError("error removing volume from storage group", err)
 	}
 
@@ -434,10 +453,10 @@ func (d *driver) thinOrThick() string {
 }
 
 func (d *driver) initStorageGroup() error {
-	_, err := d.client.GetStorageGroup(d.symmetrix.SymmetrixID, d.storageGroupId)
+	_, err := d.client.GetStorageGroup(d.symmetrix.SymmetrixID, d.groupPrefixID)
 	if err != nil {
 		if strings.Contains(err.Error(), "Cannot find Storage Group") {
-			err = d.client.CreateStorageGroup(d.symmetrix.SymmetrixID, "", "", d.storageGroupId)
+			err = d.client.CreateStorageGroup(d.symmetrix.SymmetrixID, "", "", d.groupPrefixID)
 			if err != nil {
 				return err
 			}
