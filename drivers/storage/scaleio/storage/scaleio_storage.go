@@ -472,7 +472,7 @@ func (d *driver) VolumeAttach(
 
 	mapVolumeSdcParam := &siotypes.MapVolumeSdcParam{
 		SdcID: iid.ID,
-		AllowMultipleMappings: "false",
+		AllowMultipleMappings: "true",
 		AllSdcs:               "",
 	}
 
