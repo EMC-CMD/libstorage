@@ -185,8 +185,22 @@ func (d *driver) Mount(
 		return "", nil, goof.New("no volume returned or created")
 	}
 
+	var attachmentFound bool
 	client := context.MustClient(ctx)
-	if len(vol.Attachments) == 0 || opts.Preempt {
+
+	instance, err := client.Storage().InstanceInspect(ctx, utils.NewStore())
+	if err != nil {
+		return "", nil, goof.New("problem inspecting instance")
+	}
+
+	for _, attachment := range vol.Attachments {
+		if attachment.InstanceID.ID == instance.InstanceID.ID {
+			attachmentFound = true
+			break
+		}
+	}
+
+	if !attachmentFound || opts.Preempt {
 		mp, err := d.getVolumeMountPath(vol.Name)
 		if err != nil {
 			return "", nil, err
@@ -230,7 +244,14 @@ func (d *driver) Mount(
 
 	}
 
-	if len(vol.Attachments) == 0 {
+	for _, attachment := range vol.Attachments {
+		if attachment.InstanceID.ID == instance.InstanceID.ID {
+			attachmentFound = true
+			break
+		}
+	}
+
+	if !attachmentFound {
 		return "", nil, goof.New("volume did not attach")
 	}
 
