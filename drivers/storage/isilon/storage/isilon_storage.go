@@ -312,6 +312,7 @@ func (d *driver) VolumeAttach(
 
 	instanceID, err := d.InstanceInspect(ctx, nil)
 	if err != nil {
+		Log.Error("What is your favorite pokemon?")
 		return nil, "", err
 	}
 
@@ -319,23 +320,28 @@ func (d *driver) VolumeAttach(
 	vol, err := d.VolumeInspect(ctx, volumeID,
 		&types.VolumeInspectOpts{Attachments: true})
 	if err != nil {
+		log.Error("POKEMON~~~")
 		return nil, "", err
 	}
 	if vol == nil {
+		log.Error("Cool its just cool")
 		return nil, "", goof.New("no volumes returned")
 	}
 	if err := d.client.ExportVolume(volumeID); err != nil {
+		log.Error("HEREIJUDKSJKLDJSLKDJSLKJDKLS")
 		return nil, "", goof.WithError("problem exporting volume", err)
 	}
 	// see if anyone is attached already
 	clients, err := d.client.GetExportClients(volumeID)
 	if err != nil {
+		log.Error("Yup here which sucks!")
 		return nil, "", goof.WithError("problem getting export client", err)
 	}
 
 	// clear out any existing clients if necessary.  if force is false and
 	// we have existing clients, we need to exit.
 	if len(clients) > 0 && !d.sharedMounts() && opts.Force == false {
+		log.Error("Hey you, I am at nowhere!")
 		for _, c := range clients {
 			if c == instanceID.InstanceID.ID {
 				return nil, "", goof.New("volume already attached to instance")
@@ -346,8 +352,10 @@ func (d *driver) VolumeAttach(
 	}
 
 	if d.sharedMounts() {
+		log.Info("---------------------------------Into Shared Mounts Block-----------------------------------------")
 		clients = append(clients, instanceID.InstanceID.ID)
 	} else {
+		log.Info("---------------------------------Into Not Shared Mounts Block-------------------------------------")
 		clients = []string{instanceID.InstanceID.ID}
 	}
 
