@@ -3,7 +3,7 @@ package docker
 import (
 	"os"
 	"strings"
-
+        "time"
 	"fmt"
 	"strconv"
 
@@ -261,6 +261,7 @@ func (d *driver) Mount(
 	}
 
 	if len(mounts) > 0 {
+		time.Sleep(5000 * time.Millisecond)
 		return d.volumeMountPath(mounts[0].MountPoint), vol, nil
 	}
 
@@ -302,7 +303,7 @@ func (d *driver) Mount(
 		"mntPath": mntPath,
 	}
 	ctx.WithFields(fields).Info("volume mounted")
-
+        time.Sleep(5000 * time.Millisecond)
 	return mntPath, vol, nil
 }
 
